@@ -28,11 +28,12 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional, Tuple
+from aiohttp import web
+
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
-from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -42,7 +43,6 @@ from dotenv import load_dotenv
 import sys
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
-from aiohttp import web
 
 # Windowsda ba'zi soket muammolari uchun Selector event loop siyosati
 if sys.platform.startswith("win"):
@@ -80,12 +80,10 @@ CREATE TABLE IF NOT EXISTS submissions (
     student_id INTEGER NOT NULL,
     username TEXT,
     assignment TEXT NOT NULL,
-    student_desc TEXT,
     content_type TEXT NOT NULL,
     file_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     score INTEGER,
-    teacher_desc TEXT,
     graded_by INTEGER,
     graded_at TEXT
 );
@@ -94,23 +92,14 @@ CREATE TABLE IF NOT EXISTS submissions (
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TABLE_SQL)
-        # mavjud jadvalda ustunlar bo'lmasa qo'shib olish
-        try:
-            await db.execute("ALTER TABLE submissions ADD COLUMN student_desc TEXT")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE submissions ADD COLUMN teacher_desc TEXT")
-        except Exception:
-            pass
         await db.commit()
 
-async def save_submission(student_id: int, username: Optional[str], assignment: str, content_type: str, file_id: str, student_desc: Optional[str] = None) -> int:
+async def save_submission(student_id: int, username: Optional[str], assignment: str, content_type: str, file_id: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         now = datetime.utcnow().isoformat()
         cur = await db.execute(
-            "INSERT INTO submissions (student_id, username, assignment, student_desc, content_type, file_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (student_id, username, assignment, student_desc, content_type, file_id, now),
+            "INSERT INTO submissions (student_id, username, assignment, content_type, file_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (student_id, username, assignment, content_type, file_id, now),
         )
         await db.commit()
         return cur.lastrowid
@@ -161,7 +150,6 @@ async def fetch_my(student_id: int, limit: int = 10):
 # --------------------------------------------------
 class SubmitStates(StatesGroup):
     waiting_for_assignment_name = State()
-    waiting_for_description = State()
     waiting_for_content = State()
 
 # --------------------------------------------------
@@ -184,8 +172,7 @@ async def cmd_start(message: types.Message):
             "Qanday ishlaydi:\n"
             "1) /submit buyrug‘ini bosing.\n"
             "2) Vazifa nomini yozing (masalan: ‘Algebra-1’).\n"
-            "3) Izoh (ixtiyoriy) yozing.
-4) Keyin faylni yuboring.\n"
+            "3) Keyin fayl/photo/matnni yuboring.\n"
             "— Ustoz bahosi: 0, 1 yoki 2 ball.\n"
             "• /my — o‘zingizning so‘nggi topshiriqlar va ballar.\n"
         )
@@ -193,60 +180,42 @@ async def cmd_start(message: types.Message):
 
 @router.message(Command("submit"))
 async def cmd_submit(message: types.Message, state: FSMContext):
+    if message.from_user.id == TEACHER_ID:
+        return await message.answer("Bu buyruq faqat o‘quvchilar uchun.")
     await state.set_state(SubmitStates.waiting_for_assignment_name)
-    await message.answer("Vazifa nomini kiriting (masalan: ‘Algebra-1’):")
+    await message.answer("Mavzu nomini kiriting:")
+
 
 @router.message(SubmitStates.waiting_for_assignment_name, F.text)
 async def get_assignment_name(message: types.Message, state: FSMContext):
     assignment = (message.text or "").strip()
     if not assignment:
-        return await message.answer("Bo‘sh nom bo‘ldi. Iltimos, vazifa nomini kiriting.")
+        return await message.answer("Bo‘sh nom bo‘ldi. Iltimos, mavzu nomini kiriting.")
     await state.update_data(assignment=assignment)
-    await state.set_state(SubmitStates.waiting_for_description)
-    await message.answer("Izoh (ixtiyoriy) yuboring yoki /skip bosing.")
-
-@router.message(SubmitStates.waiting_for_description, F.text)
-async def get_description(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip()
-    if text.lower() in {"/skip", "skip", "o'tkazish", "otkazish"}:
-        text = ""
-    await state.update_data(student_desc=text)
     await state.set_state(SubmitStates.waiting_for_content)
-    await message.answer("Endi vazifa faylini yuboring (document yoki rasm/video ham mumkin).")
+    await message.answer("Endi mavzuni yuboring: fayl bo‘lishi mumkin.")
 
-async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:(msg: types.Message) -> Optional[Tuple[str, str]]:
-    """(content_type, file_id_or_text) qaytaradi yoki None.
-    Qo‘llab-quvvatlanadigan turlar: document, photo, text, video, audio, voice
-    """
+async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:
+    """Faqat document qabul qilamiz (PDF/DOC/DOCX/ZIP va hok.)."""
     if msg.document:
         return ("document", msg.document.file_id)
-    if msg.photo:  # eng katta rasm
-        return ("photo", msg.photo[-1].file_id)
-    if msg.video:
-        return ("video", msg.video.file_id)
-    if msg.audio:
-        return ("audio", msg.audio.file_id)
-    if msg.voice:
-        return ("voice", msg.voice.file_id)
-    if msg.text and msg.text.strip():
-        return ("text", msg.text)
     return None
+
 
 @router.message(SubmitStates.waiting_for_content)
 async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
     payload = await _extract_payload(message)
     if not payload:
-        return await message.answer("Fayl/photo/matn topilmadi. Iltimos, qaytadan yuboring.")
+        return await message.answer("Fayl topilmadi. Iltimos, qaytadan yuboring.")
 
     data = await state.get_data()
-    assignment = data.get("assignment") or "Vazifa"
+    assignment = data.get("assignment") or "Mavzu"
 
     content_type, file_id = payload
     submission_id = await save_submission(
         student_id=message.from_user.id,
         username=message.from_user.username,
         assignment=assignment,
-        student_desc=data.get("student_desc"),
         content_type=content_type,
         file_id=file_id,
     )
@@ -269,10 +238,7 @@ async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
                     "🆕 Yangi topshiriq!\n"
                     f"ID: {submission_id}\n"
                     f"O‘quvchi: @{message.from_user.username or message.from_user.id}\n"
-                    f"Vazifa: {assignment}
-"
-                    f"Izoh (o‘quvchi): { (data.get('student_desc') or '—') }
-"
+                    f"Mavzu: {assignment}\n"
                     f"Turi: {content_type}"
                 ),
                 reply_markup=kb.as_markup(),
@@ -309,13 +275,30 @@ async def cmd_pending(message: types.Message, bot: Bot):
         kb.button(text="2", callback_data=f"grade:{r['id']}:2")
         kb.adjust(1, 3)
         caption = (
-        f"ID: {row['id']}
-"
-        f"O‘quvchi: @{row['username'] or row['student_id']}
-"
-        f"Vazifa: {row['assignment']}
-"
-        f"Izoh (o‘quvchi): { (row['student_desc'] or '—') }"
+            f"ID: {r['id']}\n"
+            f"O‘quvchi: @{r['username'] or r['student_id']}\n"
+            f"Mavzu: {r['assignment']}\n"
+            f"Turi: {r['content_type']}"
+        )
+        await bot.send_message(TEACHER_ID, caption, reply_markup=kb.as_markup())
+
+@router.callback_query(F.data.startswith("show:"))
+async def on_show(call: types.CallbackQuery, bot: Bot):
+    if call.from_user.id != TEACHER_ID:
+        return await call.answer("Faqat ustoz uchun.", show_alert=True)
+    try:
+        submission_id = int(call.data.split(":")[1])
+    except Exception:
+        return await call.answer("Noto‘g‘ri ID.", show_alert=True)
+
+    row = await fetch_one(submission_id)
+    if not row:
+        return await call.answer("Topilmadi.", show_alert=True)
+
+    caption = (
+        f"ID: {row['id']}\n"
+        f"O‘quvchi: @{row['username'] or row['student_id']}\n"
+        f"Mavzu: {row['assignment']}"
     )
     ct, fid = row["content_type"], row["file_id"]
     try:
@@ -357,65 +340,21 @@ async def on_grade(call: types.CallbackQuery, bot: Bot):
     _, student_id = res
     await call.answer(f"Baho qo‘yildi: {score}")
 
-    # o‘quvchiga xabar berish (ustoz izohi bo'lsa qo'shamiz)
+    # o‘quvchiga xabar berish
     try:
-        row = await fetch_one(submission_id)
-        teacher_desc = row["teacher_desc"] if row else None
-        text = f"📢 Sizning topshirig‘ingiz baholandi. ID: {submission_id} — baho: {score}"
-        if teacher_desc:
-            text += f"
-Izoh: {teacher_desc}"
-        await bot.send_message(student_id, text)
+        await bot.send_message(student_id, f"📢 Sizning topshirig‘ingiz baholandi. ID: {submission_id} — baho: {score}")
     except Exception as e:
         logger.warning("O‘quvchiga xabar yuborib bo‘lmadi: %s", e)
 
-# --------------- USTOZ IZOH QO'SHISH (/comment) ---------------
-async def update_teacher_comment(submission_id: int, teacher_desc: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "UPDATE submissions SET teacher_desc = ? WHERE id = ?",
-            (teacher_desc, submission_id),
-        )
-        await db.commit()
-        return cur.rowcount > 0
-
-@router.message(Command("comment"))
-async def cmd_comment(message: types.Message, command: CommandObject, bot: Bot):
-    if message.from_user.id != TEACHER_ID:
-        return await message.answer("Bu buyruq faqat ustoz uchun.")
-    args = (command.args or "").strip()
-    if not args or " " not in args:
-        return await message.answer("Foydalanish: /comment <ID> <izoh>")
-    sid_str, comment = args.split(" ", 1)
-    try:
-        sid = int(sid_str)
-    except ValueError:
-        return await message.answer("ID butun son bo‘lishi kerak.")
-
-    ok = await update_teacher_comment(sid, comment.strip())
-    if not ok:
-        return await message.answer("Topshiriq topilmadi.")
-
-    row = await fetch_one(sid)
-    if row:
-        try:
-            await bot.send_message(row["student_id"], f"📌 Ustoz izohi (ID {sid}):
-{comment}")
-        except Exception:
-            pass
-    await message.answer("Izoh saqlandi.")
-
 # --------------------------------------------------
-# Healthcheck uchun minimal web server (Render/Vercel kabi platformalar $PORT talab qiladi)
+# main
 # --------------------------------------------------
 async def start_health_server():
     async def ok(_):
         return web.Response(text="ok")
-
     app = web.Application()
     app.router.add_get("/", ok)
     app.router.add_get("/health", ok)
-
     port = int(os.getenv("PORT", "8000"))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -423,13 +362,9 @@ async def start_health_server():
     await site.start()
     logger.info("Health server listening on :%s", port)
 
-# --------------------------------------------------
-# main
-# --------------------------------------------------
 async def main():
     await init_db()
-    # Health serverni ishga tushiramiz (PORT talab qiladigan hostinglar uchun)
-    await start_health_server()
+    await start_health_server()           # <-- BU ALBATTA BOR BO'LSIN!
     dp = Dispatcher()
     dp.include_router(router)
 
