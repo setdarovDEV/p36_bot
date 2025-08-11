@@ -184,8 +184,8 @@ async def cmd_start(message: types.Message):
             "Qanday ishlaydi:\n"
             "1) /submit buyrug‘ini bosing.\n"
             "2) Vazifa nomini yozing (masalan: ‘Algebra-1’).\n"
-            "3) Izoh (ixtiyoriy) yozing.
-4) Keyin faylni yuboring.\n"
+            "3) Izoh (ixtiyoriy) yozing. \n"
+            "4) Keyin faylni yuboring."
             "— Ustoz bahosi: 0, 1 yoki 2 ball.\n"
             "• /my — o‘zingizning so‘nggi topshiriqlar va ballar.\n"
         )
@@ -212,24 +212,12 @@ async def get_description(message: types.Message, state: FSMContext):
         text = ""
     await state.update_data(student_desc=text)
     await state.set_state(SubmitStates.waiting_for_content)
-    await message.answer("Endi vazifa faylini yuboring (document yoki rasm/video ham mumkin).")
+    await message.answer("Endi vazifa faylini yuboring (faqat document).")
 
-async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:(msg: types.Message) -> Optional[Tuple[str, str]]:
-    """(content_type, file_id_or_text) qaytaradi yoki None.
-    Qo‘llab-quvvatlanadigan turlar: document, photo, text, video, audio, voice
-    """
+async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:
+    """Faqat document qabul qilamiz (PDF/DOC/DOCX/ZIP va hok.)."""
     if msg.document:
         return ("document", msg.document.file_id)
-    if msg.photo:  # eng katta rasm
-        return ("photo", msg.photo[-1].file_id)
-    if msg.video:
-        return ("video", msg.video.file_id)
-    if msg.audio:
-        return ("audio", msg.audio.file_id)
-    if msg.voice:
-        return ("voice", msg.voice.file_id)
-    if msg.text and msg.text.strip():
-        return ("text", msg.text)
     return None
 
 @router.message(SubmitStates.waiting_for_content)
@@ -266,13 +254,11 @@ async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
             await bot.send_message(
                 TEACHER_ID,
                 (
-                    "🆕 Yangi topshiriq!\n"
-                    f"ID: {submission_id}\n"
-                    f"O‘quvchi: @{message.from_user.username or message.from_user.id}\n"
-                    f"Vazifa: {assignment}
-"
-                    f"Izoh (o‘quvchi): { (data.get('student_desc') or '—') }
-"
+                    "🆕 Yangi topshiriq!"
+                    f"ID: {submission_id}"
+                    f"O‘quvchi: @{message.from_user.username or message.from_user.id}"
+                    f"Vazifa: {assignment}"
+                    f"Izoh (o‘quvchi): {(data.get('student_desc') or '—')}"
                     f"Turi: {content_type}"
                 ),
                 reply_markup=kb.as_markup(),
@@ -287,21 +273,6 @@ async def cmd_my(message: types.Message):
         return await message.answer("Hali topshirig‘ingiz yo‘q.")
     lines = ["So‘nggi topshiriqlaringiz:"]
     for r in rows:
-        score_txt = "—" if r["score"] is None else str(r["score"])
-        lines.append(f"#{r['id']} | {r['assignment']} | baho: {score_txt}")
-    await message.answer("\n".join(lines))
-
-# --------------- USTOZ UCHUN ---------------
-@router.message(Command("pending"))
-async def cmd_pending(message: types.Message, bot: Bot):
-    if message.from_user.id != TEACHER_ID:
-        return await message.answer("Bu buyruq faqat ustoz uchun.")
-
-    rows = await fetch_pending(limit=10)
-    if not rows:
-        return await message.answer("Baholanmagan topshiriqlar yo‘q.")
-
-    for r in rows:
         kb = InlineKeyboardBuilder()
         kb.button(text="Ko‘rish", callback_data=f"show:{r['id']}")
         kb.button(text="0", callback_data=f"grade:{r['id']}:0")
@@ -309,13 +280,32 @@ async def cmd_pending(message: types.Message, bot: Bot):
         kb.button(text="2", callback_data=f"grade:{r['id']}:2")
         kb.adjust(1, 3)
         caption = (
-        f"ID: {row['id']}
-"
-        f"O‘quvchi: @{row['username'] or row['student_id']}
-"
-        f"Vazifa: {row['assignment']}
-"
-        f"Izoh (o‘quvchi): { (row['student_desc'] or '—') }"
+            f"ID: {r['id']}"
+            f"O‘quvchi: @{r['username'] or r['student_id']}"
+            f"Vazifa: {r['assignment']}"
+            f"Izoh (o‘quvchi): {(r['student_desc'] or '—')}"
+            f"Turi: {r['content_type']}"
+        )
+        await bot.send_message(TEACHER_ID, caption, reply_markup=kb.as_markup())
+
+@router.callback_query(F.data.startswith("show:"))
+async def on_show(call: types.CallbackQuery, bot: Bot):
+    if call.from_user.id != TEACHER_ID:
+        return await call.answer("Faqat ustoz uchun.", show_alert=True)
+    try:
+        submission_id = int(call.data.split(":")[1])
+    except Exception:
+        return await call.answer("Noto‘g‘ri ID.", show_alert=True)
+
+    row = await fetch_one(submission_id)
+    if not row:
+        return await call.answer("Topilmadi.", show_alert=True)
+
+    caption = (
+        f"ID: {row['id']}"
+        f"O‘quvchi: @{row['username'] or row['student_id']}"
+        f"Vazifa: {row['assignment']}"
+        f"Izoh (o‘quvchi): {(row['student_desc'] or '—')}"
     )
     ct, fid = row["content_type"], row["file_id"]
     try:
@@ -330,7 +320,7 @@ async def cmd_pending(message: types.Message, bot: Bot):
         elif ct == "voice":
             await bot.send_voice(TEACHER_ID, fid, caption=caption)
         elif ct == "text":
-            await bot.send_message(TEACHER_ID, f"[MATN]\n{caption}\n\n{fid}")
+            await bot.send_message(TEACHER_ID, f"[MATN] {caption} {fid}")
         else:
             await call.answer("Qo‘llab-quvvatlanmagan tur.", show_alert=True)
     except Exception as e:
@@ -363,8 +353,7 @@ async def on_grade(call: types.CallbackQuery, bot: Bot):
         teacher_desc = row["teacher_desc"] if row else None
         text = f"📢 Sizning topshirig‘ingiz baholandi. ID: {submission_id} — baho: {score}"
         if teacher_desc:
-            text += f"
-Izoh: {teacher_desc}"
+            text += f"Izoh: {teacher_desc}"
         await bot.send_message(student_id, text)
     except Exception as e:
         logger.warning("O‘quvchiga xabar yuborib bo‘lmadi: %s", e)
@@ -399,8 +388,7 @@ async def cmd_comment(message: types.Message, command: CommandObject, bot: Bot):
     row = await fetch_one(sid)
     if row:
         try:
-            await bot.send_message(row["student_id"], f"📌 Ustoz izohi (ID {sid}):
-{comment}")
+            await bot.send_message(row["student_id"], f"📌 Ustoz izohi (ID {sid}): {comment}")
         except Exception:
             pass
     await message.answer("Izoh saqlandi.")
