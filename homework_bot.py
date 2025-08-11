@@ -185,7 +185,7 @@ async def cmd_start(message: types.Message):
             "1) /submit buyrug‘ini bosing.\n"
             "2) Vazifa nomini yozing (masalan: ‘Algebra-1’).\n"
             "3) Izoh (ixtiyoriy) yozing. \n"
-            "4) Keyin faylni yuboring."
+            "4) Keyin faylni yuboring. \n"
             "— Ustoz bahosi: 0, 1 yoki 2 ball.\n"
             "• /my — o‘zingizning so‘nggi topshiriqlar va ballar.\n"
         )
@@ -224,7 +224,7 @@ async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:
 async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
     payload = await _extract_payload(message)
     if not payload:
-        return await message.answer("Fayl/photo/matn topilmadi. Iltimos, qaytadan yuboring.")
+        return await message.answer("Fayl topilmadi. Iltimos, qaytadan yuboring.")
 
     data = await state.get_data()
     assignment = data.get("assignment") or "Vazifa"
@@ -254,12 +254,12 @@ async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
             await bot.send_message(
                 TEACHER_ID,
                 (
-                    "🆕 Yangi topshiriq!"
-                    f"ID: {submission_id}"
-                    f"O‘quvchi: @{message.from_user.username or message.from_user.id}"
-                    f"Vazifa: {assignment}"
-                    f"Izoh (o‘quvchi): {(data.get('student_desc') or '—')}"
-                    f"Turi: {content_type}"
+                    "🆕 Yangi topshiriq! "
+                    f"ID: {submission_id} "
+                    f"O‘quvchi: @{message.from_user.username or message.from_user.id} "
+                    f"Vazifa: {assignment} "
+                    f"Izoh (o‘quvchi): {(data.get('student_desc') or '—')} "
+                    f"Turi: {content_type} "
                 ),
                 reply_markup=kb.as_markup(),
             )
