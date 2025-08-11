@@ -10,7 +10,7 @@ Texnologiyalar:
 - python-dotenv (.env dan token/TEACHER_ID)
 
 Ishga tushirish:
-1) `pip install aiogram>=3.5.0 aiosqlite python-dotenv`
+1) `pip install aiogram>=3.5.0 aiosqlite python-dotenv aiohttp`
 2) .env fayl yarating (shu papkada):
    BOT_TOKEN=123456:ABC...
    TEACHER_ID=123456789
@@ -18,9 +18,10 @@ Ishga tushirish:
 
 Asosiy komandalar:
 - /start — ro‘l va yo‘riqnoma
-- /submit — vazifa topshirish jarayonini boshlash (nom → fayl/matn)
+- /submit — vazifa topshirish jarayonini boshlash (nom → izoh → fayl)
 - /my — o‘quvchining o‘z topshiriqlari va ballari
 - /pending — (faqat ustoz) baholanmaganlarni ko‘rish va baholash
+- /comment <ID> <izoh> — (faqat ustoz) topshiriqqa izoh qoldirish
 """
 
 import asyncio
@@ -28,21 +29,21 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional, Tuple
-from aiohttp import web
-
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
+from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-# --- Qo'shimcha importlar (Windows/IPv4/timeout/retry) ---
+# --- Qo'shimcha importlar (timeout/retry + health web) ---
 import sys
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
+from aiohttp import web
 
 # Windowsda ba'zi soket muammolari uchun Selector event loop siyosati
 if sys.platform.startswith("win"):
@@ -65,7 +66,7 @@ if not BOT_TOKEN:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("homework_bot")
 
-# --- Bot sessiyasini sozlash (IPv4 majburiy + timeout) ---
+# --- Bot sessiyasini sozlash ---
 def build_bot() -> Bot:
     # Aiogram AiohttpSession timeout parametri sekunlarda int/float bo'lishi kerak
     session = AiohttpSession(timeout=90)
@@ -80,10 +81,12 @@ CREATE TABLE IF NOT EXISTS submissions (
     student_id INTEGER NOT NULL,
     username TEXT,
     assignment TEXT NOT NULL,
+    student_desc TEXT,
     content_type TEXT NOT NULL,
     file_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     score INTEGER,
+    teacher_desc TEXT,
     graded_by INTEGER,
     graded_at TEXT
 );
@@ -92,14 +95,23 @@ CREATE TABLE IF NOT EXISTS submissions (
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TABLE_SQL)
+        # mavjud jadvalda ustunlar bo'lmasa qo'shib olish (migratsiya)
+        try:
+            await db.execute("ALTER TABLE submissions ADD COLUMN student_desc TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE submissions ADD COLUMN teacher_desc TEXT")
+        except Exception:
+            pass
         await db.commit()
 
-async def save_submission(student_id: int, username: Optional[str], assignment: str, content_type: str, file_id: str) -> int:
+async def save_submission(student_id: int, username: Optional[str], assignment: str, content_type: str, file_id: str, student_desc: Optional[str] = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         now = datetime.utcnow().isoformat()
         cur = await db.execute(
-            "INSERT INTO submissions (student_id, username, assignment, content_type, file_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (student_id, username, assignment, content_type, file_id, now),
+            "INSERT INTO submissions (student_id, username, assignment, student_desc, content_type, file_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (student_id, username, assignment, student_desc, content_type, file_id, now),
         )
         await db.commit()
         return cur.lastrowid
@@ -119,6 +131,15 @@ async def fetch_one(submission_id: int):
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM submissions WHERE id = ?", (submission_id,))
         return await cur.fetchone()
+
+async def update_teacher_comment(submission_id: int, teacher_desc: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE submissions SET teacher_desc = ? WHERE id = ?",
+            (teacher_desc, submission_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 async def grade_submission(submission_id: int, score: int, teacher_id: int) -> Optional[Tuple[int, int]]:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -150,6 +171,7 @@ async def fetch_my(student_id: int, limit: int = 10):
 # --------------------------------------------------
 class SubmitStates(StatesGroup):
     waiting_for_assignment_name = State()
+    waiting_for_description = State()
     waiting_for_content = State()
 
 # --------------------------------------------------
@@ -165,6 +187,7 @@ async def cmd_start(message: types.Message):
             "Buyruqlar:\n"
             "• /pending — baholanmagan topshiriqlar ro‘yxati\n"
             "— Har bir topshiriqda [0] [1] [2] tugmalari orqali baho qo‘yishingiz mumkin.\n"
+            "• /comment <ID> <izoh> — topshiriqqa ustoz izohi qoldirish.\n"
         )
     else:
         text = (
@@ -172,7 +195,8 @@ async def cmd_start(message: types.Message):
             "Qanday ishlaydi:\n"
             "1) /submit buyrug‘ini bosing.\n"
             "2) Vazifa nomini yozing (masalan: ‘Algebra-1’).\n"
-            "3) Keyin fayl/photo/matnni yuboring.\n"
+            "3) Izoh (ixtiyoriy) yozing.\n"
+            "4) Keyin faylni yuboring (faqat document).\n"
             "— Ustoz bahosi: 0, 1 yoki 2 ball.\n"
             "• /my — o‘zingizning so‘nggi topshiriqlar va ballar.\n"
         )
@@ -183,17 +207,25 @@ async def cmd_submit(message: types.Message, state: FSMContext):
     if message.from_user.id == TEACHER_ID:
         return await message.answer("Bu buyruq faqat o‘quvchilar uchun.")
     await state.set_state(SubmitStates.waiting_for_assignment_name)
-    await message.answer("Mavzu nomini kiriting:")
-
+    await message.answer("Vazifa nomini kiriting (masalan: ‘Algebra-1’):")
 
 @router.message(SubmitStates.waiting_for_assignment_name, F.text)
 async def get_assignment_name(message: types.Message, state: FSMContext):
     assignment = (message.text or "").strip()
     if not assignment:
-        return await message.answer("Bo‘sh nom bo‘ldi. Iltimos, mavzu nomini kiriting.")
+        return await message.answer("Bo‘sh nom bo‘ldi. Iltimos, vazifa nomini kiriting.")
     await state.update_data(assignment=assignment)
+    await state.set_state(SubmitStates.waiting_for_description)
+    await message.answer("Izoh (ixtiyoriy) yuboring yoki /skip bosing.")
+
+@router.message(SubmitStates.waiting_for_description, F.text)
+async def get_description(message: types.Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if text.lower() in {"/skip", "skip", "o'tkazish", "otkazish"}:
+        text = ""
+    await state.update_data(student_desc=text)
     await state.set_state(SubmitStates.waiting_for_content)
-    await message.answer("Endi mavzuni yuboring: fayl bo‘lishi mumkin.")
+    await message.answer("Endi vazifa faylini yuboring (faqat document).")
 
 async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:
     """Faqat document qabul qilamiz (PDF/DOC/DOCX/ZIP va hok.)."""
@@ -201,21 +233,21 @@ async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:
         return ("document", msg.document.file_id)
     return None
 
-
 @router.message(SubmitStates.waiting_for_content)
 async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
     payload = await _extract_payload(message)
     if not payload:
-        return await message.answer("Fayl topilmadi. Iltimos, qaytadan yuboring.")
+        return await message.answer("Fayl topilmadi. Iltimos, faqat document yuboring.")
 
     data = await state.get_data()
-    assignment = data.get("assignment") or "Mavzu"
+    assignment = data.get("assignment") or "Vazifa"
 
     content_type, file_id = payload
     submission_id = await save_submission(
         student_id=message.from_user.id,
         username=message.from_user.username,
         assignment=assignment,
+        student_desc=data.get("student_desc"),
         content_type=content_type,
         file_id=file_id,
     )
@@ -238,7 +270,8 @@ async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
                     "🆕 Yangi topshiriq!\n"
                     f"ID: {submission_id}\n"
                     f"O‘quvchi: @{message.from_user.username or message.from_user.id}\n"
-                    f"Mavzu: {assignment}\n"
+                    f"Vazifa: {assignment}\n"
+                    f"Izoh (o‘quvchi): {(data.get('student_desc') or '—')}\n"
                     f"Turi: {content_type}"
                 ),
                 reply_markup=kb.as_markup(),
@@ -277,7 +310,8 @@ async def cmd_pending(message: types.Message, bot: Bot):
         caption = (
             f"ID: {r['id']}\n"
             f"O‘quvchi: @{r['username'] or r['student_id']}\n"
-            f"Mavzu: {r['assignment']}\n"
+            f"Vazifa: {r['assignment']}\n"
+            f"Izoh (o‘quvchi): {(r['student_desc'] or '—')}\n"
             f"Turi: {r['content_type']}"
         )
         await bot.send_message(TEACHER_ID, caption, reply_markup=kb.as_markup())
@@ -298,7 +332,8 @@ async def on_show(call: types.CallbackQuery, bot: Bot):
     caption = (
         f"ID: {row['id']}\n"
         f"O‘quvchi: @{row['username'] or row['student_id']}\n"
-        f"Mavzu: {row['assignment']}"
+        f"Vazifa: {row['assignment']}\n"
+        f"Izoh (o‘quvchi): {(row['student_desc'] or '—')}"
     )
     ct, fid = row["content_type"], row["file_id"]
     try:
@@ -340,21 +375,53 @@ async def on_grade(call: types.CallbackQuery, bot: Bot):
     _, student_id = res
     await call.answer(f"Baho qo‘yildi: {score}")
 
-    # o‘quvchiga xabar berish
+    # o‘quvchiga xabar berish (ustoz izohi bo'lsa qo'shamiz)
     try:
-        await bot.send_message(student_id, f"📢 Sizning topshirig‘ingiz baholandi. ID: {submission_id} — baho: {score}")
+        row = await fetch_one(submission_id)
+        teacher_desc = row["teacher_desc"] if row else None
+        text = f"📢 Sizning topshirig‘ingiz baholandi. ID: {submission_id} — baho: {score}"
+        if teacher_desc:
+            text += f"\nIzoh: {teacher_desc}"
+        await bot.send_message(student_id, text)
     except Exception as e:
         logger.warning("O‘quvchiga xabar yuborib bo‘lmadi: %s", e)
 
+@router.message(Command("comment"))
+async def cmd_comment(message: types.Message, command: CommandObject, bot: Bot):
+    if message.from_user.id != TEACHER_ID:
+        return await message.answer("Bu buyruq faqat ustoz uchun.")
+    args = (command.args or "").strip()
+    if not args or " " not in args:
+        return await message.answer("Foydalanish: /comment <ID> <izoh>")
+    sid_str, comment = args.split(" ", 1)
+    try:
+        sid = int(sid_str)
+    except ValueError:
+        return await message.answer("ID butun son bo‘lishi kerak.")
+
+    ok = await update_teacher_comment(sid, comment.strip())
+    if not ok:
+        return await message.answer("Topshiriq topilmadi.")
+
+    row = await fetch_one(sid)
+    if row:
+        try:
+            await bot.send_message(row["student_id"], f"📌 Ustoz izohi (ID {sid}):\n{comment}")
+        except Exception:
+            pass
+    await message.answer("Izoh saqlandi.")
+
 # --------------------------------------------------
-# main
+# Healthcheck uchun minimal web server (Render/Vercel kabi platformalar $PORT talab qiladi)
 # --------------------------------------------------
 async def start_health_server():
     async def ok(_):
         return web.Response(text="ok")
+
     app = web.Application()
     app.router.add_get("/", ok)
     app.router.add_get("/health", ok)
+
     port = int(os.getenv("PORT", "8000"))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -362,9 +429,13 @@ async def start_health_server():
     await site.start()
     logger.info("Health server listening on :%s", port)
 
+# --------------------------------------------------
+# main
+# --------------------------------------------------
 async def main():
     await init_db()
-    await start_health_server()           # <-- BU ALBATTA BOR BO'LSIN!
+    # Health serverni ishga tushiramiz (PORT talab qiladigan hostinglar uchun)
+    await start_health_server()
     dp = Dispatcher()
     dp.include_router(router)
 
@@ -372,6 +443,15 @@ async def main():
     while True:
         bot = build_bot()
         try:
+            # webhook tozalash (polling bilan to‘qnashmasin)
+            try:
+                info = await bot.get_webhook_info()
+                if info.url:
+                    await bot.delete_webhook(drop_pending_updates=True)
+                    logger.info("Webhook o‘chirildi: %s", info.url)
+            except Exception:
+                pass
+
             logger.info("Bot ishga tushmoqda...")
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         except TelegramNetworkError as e:
