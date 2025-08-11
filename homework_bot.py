@@ -180,8 +180,11 @@ async def cmd_start(message: types.Message):
 
 @router.message(Command("submit"))
 async def cmd_submit(message: types.Message, state: FSMContext):
+    if message.from_user.id == TEACHER_ID:
+        return await message.answer("Bu buyruq faqat o‘quvchilar uchun.")
     await state.set_state(SubmitStates.waiting_for_assignment_name)
-    await message.answer("Mavzu nomini kiriting: ")
+    await message.answer("Mavzu nomini kiriting:")
+
 
 @router.message(SubmitStates.waiting_for_assignment_name, F.text)
 async def get_assignment_name(message: types.Message, state: FSMContext):
@@ -193,22 +196,11 @@ async def get_assignment_name(message: types.Message, state: FSMContext):
     await message.answer("Endi mavzuni yuboring: fayl/photo/matn bo‘lishi mumkin.")
 
 async def _extract_payload(msg: types.Message) -> Optional[Tuple[str, str]]:
-    """(content_type, file_id_or_text) qaytaradi yoki None.
-    Qo‘llab-quvvatlanadigan turlar: document, photo, text, video, audio, voice
-    """
+    """Faqat document qabul qilamiz (PDF/DOC/DOCX/ZIP va hok.)."""
     if msg.document:
         return ("document", msg.document.file_id)
-    if msg.photo:  # eng katta rasm
-        return ("photo", msg.photo[-1].file_id)
-    if msg.video:
-        return ("video", msg.video.file_id)
-    if msg.audio:
-        return ("audio", msg.audio.file_id)
-    if msg.voice:
-        return ("voice", msg.voice.file_id)
-    if msg.text and msg.text.strip():
-        return ("text", msg.text)
     return None
+
 
 @router.message(SubmitStates.waiting_for_content)
 async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
