@@ -28,6 +28,8 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional, Tuple
+from aiohttp import web
+
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router, types
@@ -355,8 +357,22 @@ async def on_grade(call: types.CallbackQuery, bot: Bot):
 # --------------------------------------------------
 # main
 # --------------------------------------------------
+async def start_health_server():
+    async def ok(_):
+        return web.Response(text="ok")
+    app = web.Application()
+    app.router.add_get("/", ok)
+    app.router.add_get("/health", ok)
+    port = int(os.getenv("PORT", "8000"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("Health server listening on :%s", port)
+
 async def main():
     await init_db()
+    await start_health_server()           # <-- BU ALBATTA BOR BO'LSIN!
     dp = Dispatcher()
     dp.include_router(router)
 
