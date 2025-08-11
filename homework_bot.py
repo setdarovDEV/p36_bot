@@ -184,12 +184,14 @@ async def cmd_start(message: types.Message):
             "Qanday ishlaydi:\n"
             "1) /submit buyrug‘ini bosing.\n"
             "2) Vazifa nomini yozing (masalan: ‘Algebra-1’).\n"
-            "3) Izoh (ixtiyoriy) yozing. \n"
-            "4) Keyin faylni yuboring. \n"
+            "3) Izoh (ixtiyoriy) yozing.\n"
+            "4) Keyin faylni yuboring.\n"
+
             "— Ustoz bahosi: 0, 1 yoki 2 ball.\n"
             "• /my — o‘zingizning so‘nggi topshiriqlar va ballar.\n"
         )
     await message.answer(text)
+
 
 @router.message(Command("submit"))
 async def cmd_submit(message: types.Message, state: FSMContext):
@@ -254,12 +256,12 @@ async def receive_content(message: types.Message, state: FSMContext, bot: Bot):
             await bot.send_message(
                 TEACHER_ID,
                 (
-                    "🆕 Yangi topshiriq! "
-                    f"ID: {submission_id} "
-                    f"O‘quvchi: @{message.from_user.username or message.from_user.id} "
-                    f"Vazifa: {assignment} "
-                    f"Izoh (o‘quvchi): {(data.get('student_desc') or '—')} "
-                    f"Turi: {content_type} "
+                    "🆕 Yangi topshiriq!\n"
+                    f"ID: {submission_id}\n"
+                    f"O‘quvchi: @{message.from_user.username or message.from_user.id}\n"
+                    f"Vazifa: {assignment}\n"
+                    f"Izoh (o‘quvchi): {(data.get('student_desc') or '—')}\n"
+                    f"Turi: {content_type}"
                 ),
                 reply_markup=kb.as_markup(),
             )
@@ -411,6 +413,7 @@ async def start_health_server():
     await site.start()
     logger.info("Health server listening on :%s", port)
 
+
 # --------------------------------------------------
 # main
 # --------------------------------------------------
@@ -423,10 +426,18 @@ async def main():
 
     retry_delay = 5
     while True:
+        # main() ichida, bot yaratgandan KEYIN va start_polling DAN OLDIN:
         bot = build_bot()
         try:
+            # webhook o‘rnatilgan bo‘lsa, polling bilan to‘qnashmasin
+            info = await bot.get_webhook_info()
+            if info.url:
+                await bot.delete_webhook(drop_pending_updates=True)
+                logger.info("Webhook topildi va o‘chirildi: %s", info.url)
+
             logger.info("Bot ishga tushmoqda...")
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
         except TelegramNetworkError as e:
             logger.error("TelegramNetworkError: %s", e)
         except Exception as e:
@@ -447,3 +458,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("Bot to‘xtatildi")
+
+
